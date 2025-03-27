@@ -1,0 +1,114 @@
+<script>
+(function() {
+    if (!window.__piiRedact) {
+        window.__piiRedact = true;
+
+        // Regex List
+        var piiRegex = [
+            { name: 'EMAIL', regex: /(?=.*[a-zA-Z])[a-zA-Z0-9+_.-]{3,}(@|%40)[a-zA-Z0-9+_.-]{4,}/gi, group: '' },
+            { name: 'SELF-EMAIL', regex: /(?=.*[a-zA-Z])[^\/]{4}(@|%40)(?!example\.com)[^\/]{4}/gi, group: '' },
+            { name: 'TEL', regex: /((tel=)|(telephone=)|(phone=)|(mobile=)|(mob=))[\d\+\s][^&\/\?]+/gi, group: '$1' },
+            { name: 'NAME', regex: /((firstname=)|(lastname=)|(surname=)|(fname=)|(lname=))[^&\/\?]+/gi, group: '$1' },
+            { name: 'PASSWORD', regex: /((password=)|(passwd=)|(pass=))[^&\/\?]+/gi, group: '$1' },
+            { name: 'USERNAME', regex: /((username=)|(name=))[^&\/\?]+/gi, group: '$1' },
+            { name: 'ADDRESS', regex: /((address=)|(address1=)|(address2=))[^&\/\?]+/gi, group: '$1' },
+            { name: 'ZIP', regex: /((zipCode=)|(postalCode=))[^&\/\?\%]+/gi, group: '$1' }
+        ];
+
+        // Inline Redaction Logic
+        var redactPayload = function(payload) {
+            var queryString2Object = function(str) {
+                var query = str.indexOf('?') === 0 ? str.slice(1) : str;
+                var obj = {};
+                var pairs = query.split('&');
+                for (var i = 0; i < pairs.length; i++) {
+                    var pair = pairs[i].split('=');
+                    var key = decodeURIComponent(pair[0]);
+                    var value = pair.length > 1 ? decodeURIComponent(pair[1]) : '';
+                    if (key) {
+                        obj[key] = value;
+                    }
+                }
+                return obj;
+            };
+
+            var object2QueryString = function(obj) {
+                var queryString = [];
+                for (var key in obj) {
+                    if (obj.hasOwnProperty(key)) {
+                        queryString.push(encodeURIComponent(key) + '=' + encodeURIComponent(obj[key]));
+                    }
+                }
+                return queryString.join('&');
+            };
+
+            var parsedPayload = queryString2Object(payload);
+            for (var key in parsedPayload) {
+                if (parsedPayload.hasOwnProperty(key)) {
+                    for (var j = 0; j < piiRegex.length; j++) {
+                        var pii = piiRegex[j];
+                        if (parsedPayload[key].match(pii.regex)) {
+                            parsedPayload[key] = parsedPayload[key].replace(pii.regex, pii.group + '[REDACTED ' + pii.name + ']');
+                        }
+                    }
+                }
+            }
+            return object2QueryString(parsedPayload);
+        };
+
+        try {
+            // Inline SendBeacon Patch
+            (function() {
+                var originalSendBeacon = navigator.sendBeacon;
+                navigator.sendBeacon = function(url, data) {
+                    if (url.indexOf('google-analytics.com') !== -1 || url.indexOf('analytics.google.com') !== -1) {
+                        var parts = url.split('?');
+                        var endpoint = parts[0];
+                        var query = parts[1];
+                        var redactedQuery = redactPayload(query);
+                        if (data) {
+                            var events = data.split('\r\n').map(function(event) {
+                                return redactPayload(event);
+                            }).join('\r\n');
+                            return originalSendBeacon.call(this, endpoint + '?' + redactedQuery, events);
+                        }
+                        return originalSendBeacon.call(this, endpoint + '?' + redactedQuery);
+                    }
+                    return originalSendBeacon.apply(this, arguments);
+                };
+            })();
+
+            // Inline Fetch Patch analytics.google.com
+            (function() {
+                var originalFetch = window.fetch;
+                window.fetch = function(input, init) {
+                    if (typeof input === 'string' && (input.indexOf('google-analytics.com') !== -1 ||  input.indexOf('analytics.google.com') !== -1 )) {
+                        var url = document.createElement('a');
+                        url.href = input;
+
+                        var payload = redactPayload(url.search);
+                        url.search = payload;
+
+                        if (init && init.body) {
+                            if (typeof init.body === 'string') {
+                                init.body = redactPayload(init.body);
+                            } else if (init.body instanceof URLSearchParams) {
+                                var params = new URLSearchParams(init.body);
+                                params.forEach(function(value, key) {
+                                    params.set(key, redactPayload(value));
+                                });
+                                init.body = params.toString();
+                            }
+                        }
+
+                        return originalFetch.call(this, url.href, init);
+                    }
+                    return originalFetch.apply(this, arguments);
+                };
+            })();
+        } catch (e) {
+            console.error('Error patching analytics functions:', e);
+        }
+    }
+})();
+</script>
